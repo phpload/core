@@ -1,0 +1,4 @@
+# We need a Socket-Server!
+
+- if a Systemowner want to shut down ALL running workers
+- communicating with threads
