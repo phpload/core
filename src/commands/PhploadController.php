@@ -2,17 +2,17 @@
 
 declare (ticks=1);
 
-namespace phpload\commands;
+namespace phpload\core\commands;
 
 use Yii;
 use yii\console\Controller;
 use yii\helpers\ArrayHelper;
-use phpload\models\DownloadJob;
-use phpload\models\DownloadItem;
 use yii\helpers\Json;
+use yii\helpers\Console;
 use Symfony\Component\Finder\Finder;
 use Symfony\Component\Finder\SplFileInfo;
-use phpload\helpers\Dictionary;
+use phpload\core\models\{DownloadJob,DownloadItem,PremiumAccount};
+use phpload\core\helpers\Dictionary;
 
 /**
  * The supervisor observes a dlc-work-directory. If a new DLC-File is found,
@@ -43,7 +43,7 @@ use phpload\helpers\Dictionary;
  * - curl_setopt(CURLOPT_RESUME_FROM)
  * - 
  */
-class SupervisorController extends Controller
+class PhploadController extends Controller
 {
 	private $webserverpid;
 
@@ -53,13 +53,30 @@ class SupervisorController extends Controller
 
 	private $threads = [];
 
-	public function __construct()
+	public function actions()
 	{
+		return [
+			'account:list' => [
+				'class' => actions\AccountIndex::class
+			],
+			
+			'account:create' => [
+				'class' => actions\AccountCreate::class
+			]
+
+		];
+	}
+
+	public function warm()
+	{
+
 		$this->lockFile = sys_get_temp_dir() . '/phpload.lock';
 
 		if (file_exists($this->lockFile)) {
 			$pid = file_get_contents($this->lockFile);
 			exit('phpLoad is allready running with pid ' . $pid);
+
+			return;
 		}
 
 		file_put_contents($this->lockFile, posix_getpid());
@@ -87,20 +104,21 @@ class SupervisorController extends Controller
 		$this->startWebserver($this->config['webserver']['binding']);
 
 		echo "Server started and listening to " . $this->config['webserver']['binding'] ."\n";
-
-		parent::__construct();
 	}
 
-
-	public function actionIndex()
+	public function actionRun()
 	{
+		$this->warm();
+
 		$finder = new Finder();
 
 		while (true) {
 
-			sleep (1);
+			sleep (3);
 
+			$this->refreshAuthCookies();
 			$this->syncThreads();
+			$this->startThreads();
 
 			$pending_dlc = $finder->ignoreVCS(true)
 				->files()
@@ -112,23 +130,90 @@ class SupervisorController extends Controller
 			}
 
 			foreach ($pending_dlc as $dlc) {
+
+				$this->stdout("Enqueue dlc " . $dlc->getBasename() ."\n", Console::BOLD); 
+
 				$job = new DownloadJob([
 					'destination' => $this->config['downloads']['proc'],
 					'dlc' => file_get_contents($dlc->getPathname())
 				]);
 
-				if (!$job->save()) {
-					echo "Could not enqueu DLC (dlc deleted): " . print_r($job->getErrors(),true);
-					unlink ($dlc->getPathname());
-					continue;
+				if ($job->save()) {
+					$this->stdout("New Downloadjob " . $job->getPrimaryKey() . "\n", Console::BOLD);
+				} else {
+					$this->stdout("Could not enqueu DLC (dlc deleted): " . print_r($job->getErrors(),true), Console::BOLD);
 				}
 
-				echo "New Downloadjob " . $job->getPrimaryKey() . "\n";
-
+				unlink ($dlc->getPathname());
 			}
 
 		}
 
+	}
+
+	/**
+	 * Find DownloadItem state IN ('pending','paused')
+	 * Sort by state (paused first)
+	 */
+	public function startThreads()
+	{
+		$max = (int) $this->config['downloads']['threads'];
+		if (count($this->threads) >= $max) {
+			return;
+		}
+
+		$workload = DownloadItem::find()->where([
+			'state' => [Dictionary::STATE_PENDING,Dictionary::STATE_PAUSED]
+		])->orderBy(['state' => SORT_ASC])->all();
+
+		if (!$workload) {
+			return;
+		}
+
+		if ($max > count($workload)) {
+			$max = count($workload);
+		}
+
+		for ($i=0;$i<$max;$i++) {
+
+			if (!isset ($workload[$i])) {
+				continue;
+			}
+
+			$this->startThread($workload[$i]->getPrimaryKey());
+		}
+
+		$this->stdout($i ." Threads running.\n");
+
+	}
+
+	/**
+	 * refresh the AuthCookies of all configured PremiumAccounts
+	 * every 120 Minutes
+	 */
+	public function refreshAuthCookies()
+	{
+		$dt = new \DateTime();
+		$format = Yii::$app->dateFormat;
+		$refresh = PremiumAccount::find()->where([
+			'<',
+			'authCookiesValidTill',
+			$dt->format($format)
+		])->all();
+
+		if ($refresh) {
+			$this->stdout("Refreshing AuthCookies ...\n");
+			foreach ($refresh as $acc) {
+				// afterSave() refreshs the authCookie
+				try {
+					$acc->save();
+				} catch (\yii\httpclient\Exception $e) {
+					$this->stdout("Transport problem: " . $e->getMessage());
+					break;
+				}
+			}
+			$this->stdout("Done.\n");
+		}
 	}
 
 	/**
@@ -142,15 +227,16 @@ class SupervisorController extends Controller
 		foreach ($this->threads as $pid => $dlItemId) {
 			if (!posix_getpgid($pid)) {
 				unset ($this->threads[$pid]);
-				$this->updateDlItemState($dlItemId,)
+				$this->stdout("Set state to pending\n");
+				#$this->updateDlItemState($dlItemId,Dictionary::STATE_PENDING);
+				$this->updateDlItemState($dlItemId,'FOO1');
 			}
 		}
 
 		$max = (int) $this->config['downloads']['threads'];
-
 		if (count($this->threads) > $max) {
 
-			$threads = $this->threads();
+  			$threads = $this->threads;
 			$offset  = count($threads)-$max;
 
 			foreach (array_slice($threads, -($offset)) as $pid) {
@@ -160,7 +246,25 @@ class SupervisorController extends Controller
 
 		/**
 		 * Sync DB: pid not in DB
-		 */
+		 * update Runners on DB with STATE_PROC and 
+		 * no pid on OS present
+		 */	
+		$zombis = DownloadItem::find()
+			->andWhere(['state' => Dictionary::STATE_PROC])
+			->all()
+		;
+
+		foreach ($zombis as $item) {
+
+			if (posix_getpgid($item->procid)) {
+				continue;
+			}
+
+			$item->updateAttributes([
+				'state' => Dictionary::STATE_PAUSED,
+				'procid' => null
+			]);
+		}
 	}
 
 	/** 
@@ -180,7 +284,7 @@ class SupervisorController extends Controller
 		}
 
 		$model->updateAttributes([
-			'state' => $newState
+			'state' => $state
 		]);
 
 		return true;
@@ -200,14 +304,24 @@ class SupervisorController extends Controller
 	public function startThread($downloadItemId)
 	{
 		$path = Yii::getAlias('@console/phpLoad');
-		$pid = exec ("php {$path} worker > /dev/null 2>&1 & echo $!;", $output);
+		$bandwidth = 0;
+
+		if (
+			isset($this->config['downloads']['bandwith'])
+			&& $this->config['downloads']['bandwith'] > 0
+		) {
+			$threads = count($this->threads)+1;
+			$bandwidth = round(abs($this->config['downloads']['bandwith'])/$threads);
+		}
+		
+		$pid = exec ("php {$path} worker {$downloadItemId} {$bandwidth} > /dev/null 2>&1 & echo $!;", $output);
 		$this->threads[$pid] = $downloadItemId;
 	}
 
 	public function stopThread($pid)
 	{
+		$this->stdout("stopping thread {$pid}\n");
 		posix_kill((int) $pid,SIGTERM);
-		DownloadItem::findOne($this->threads[$pid])
 	}
 
 	private function stopWebserver()
@@ -219,7 +333,9 @@ class SupervisorController extends Controller
 
 	private function releaseLock()
 	{
-		unlink ($this->lockFile);
+		if (file_exists($this->lockFile)) {
+			unlink ($this->lockFile);
+		}
 	}
 
 	public function shutdownThreads()
@@ -228,7 +344,7 @@ class SupervisorController extends Controller
 			return;
 		}
 
-		foreach ($this->threads as $pid) {
+		foreach (array_keys($this->threads) as $pid) {
 			$this->stopThread($pid);
 		}
 	}

@@ -1,11 +1,11 @@
 <?php
 
-namespace phpload\commands;
+namespace phpload\core\commands;
 
 use Yii;
 use yii\console\Controller;
-use phpload\models\DownloadJob;
-use phpload\models\UploadedNetAccount;
+use phpload\core\models\DownloadJob;
+use phpload\core\models\UploadedNetAccount;
 
 class TestController extends Controller
 {

@@ -1,16 +1,18 @@
 <?php
 
-declare (ticks=1);
-
-namespace phpload\commands;
+/**
+ * NO declare ticks here!
+ * @see https://stackoverflow.com/questions/49759437/curl-cannot-be-killed-by-a-php-sigint-with-custom-signal-handler
+ */
+namespace phpload\core\commands;
 
 use Yii;
 use yii\console\Controller;
 use yii\helpers\ArrayHelper;
-use phpload\models\DownloadJob;
-use phpload\models\DownloadItem;
+use phpload\core\models\DownloadJob;
+use phpload\core\models\DownloadItem;
 use yii\helpers\Json;
-use phpload\helpers\Dictionary;
+use phpload\core\helpers\Dictionary;
 
 /**
  * test abort
@@ -18,44 +20,44 @@ use phpload\helpers\Dictionary;
 class WorkerController extends Controller
 {
 	/** 
-	 * @param int $jobId PK of DownloadJob
+	 * @param int $downloadItemId Primary Key of DownloadItem
+	 * @param int $limitBandwidth in kb/sec, 0 means no limit
 	 */
-	public function actionIndex($jobId)
+	public function actionIndex($downloadItemId,$limitBandwidth=0)
 	{
-		$job = DownloadJob::findOne($jobId);
+		pcntl_async_signals(true);
 
-		if (!$jobId) {
-			Yii::error(print_r("$download " . getmypid() . " could not find Job Id " . $jobId,true),__METHOD__);
+		$config = parse_ini_file("phpload.conf", true);
+
+		$item = DownloadItem::findOne($downloadItemId);
+
+		if (!$item) {
+			Yii::error(print_r("Worker PID " . getmypid() . " could not find DownloadItemId " . $downloadItemId,true),__METHOD__);
 			exit();
 		}
 
-		$download = $job->getItems()->andWhere([
-			'state' => Dictionary::STATE_PENDING,
-		])->one();
-
-		if (!$download) {
-			Yii::error(print_r("$download " . getmypid() . " could not find pending DownloadItems for jobid " . $jobId,true),__METHOD__);
+		$client = $item->getDownload($limitBandwidth);
+		if (!$client) {
+			Yii::error(print_r("no client available!",true),__METHOD__);
 			exit();
 		}
 
-		$sighandler = function (int $signo,$siginfo) use ($download) {
-			$download->updateAttributes(['state' => Dictionary::STATE_PAUSED]);
+		$sighandler = function (int $signo,$siginfo) use ($item,$client) {
+			$item->updateAttributes(['state' => Dictionary::STATE_PAUSED]);
 			exit();
 		};
 
 		pcntl_signal(SIGTERM, $sighandler);
 		pcntl_signal(SIGINT, $sighandler);
 
-		$download->updateAttributes([
+		$item->updateAttributes([
 			'state' 	=> Dictionary::STATE_PROC,
 			'procid'	=> posix_getpid()
 		]);
 
-		$download->download();
-		$download->updateAttributes(['state' => Dictionary::STATE_COMPLETED]);
-
-		rename($download->dest_file, $job->destination . '/' . $download->title);
-
+		$client->send();
+		$item->updateAttributes(['state' => Dictionary::STATE_COMPLETED]);
+		rename($item->dest_file, $config['downloads']['downloads'] . '/' . $item->title);
 	}	
 
 }

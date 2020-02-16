@@ -1,6 +1,6 @@
 <?php
 
-namespace phpload\helpers;
+namespace phpload\core\helpers;
 
 use Yii;
 
@@ -11,4 +11,5 @@ final class Dictionary
 	const STATE_COMPLETED = 'completed';
 	const STATE_ERROR = 'error';
 	const STATE_PAUSED = 'paused';
+	const STATE_OFFLINE = 'offline';
 }

@@ -2,24 +2,18 @@
 
 declare (strict_types=1);
 
-namespace phpload\models;
+namespace phpload\core\models;
 
 use Yii;
 use yii\helpers\ArrayHelper;
 use yii\helpers\Json;
 use yii\httpclient\Client;
-use phpload\interfaces\PremiumAccountInterface;
-use phpload\traits\EnsureTrait;
-use phpload\helpers\Dictionary;
+use phpload\core\traits\EnsureTrait;
+use phpload\core\helpers\Dictionary;
 
 class DownloadJob extends \yii\db\ActiveRecord
 {
 	use EnsureTrait;
-
-	/**
-	 * @var PremiumAccountInterface
-	 */
-	private $account;
 
 	public $destination;
 
@@ -31,19 +25,6 @@ class DownloadJob extends \yii\db\ActiveRecord
 	public static function tableName()
 	{
 		return 'dl_jobs';
-	}
-
-	public function setAccount(PremiumAccountInterface $account)
-	{
-		$this->ensurePk($account);			
-		$this->account = $account;
-	}
-
-	public function getAccount(): PremiumAccountInterface
-	{
-		return $this->account ?? $this->hasOne($this->accountClass, [
-			'id' => 'accountId'
-		])->one();
 	}
 
 	public function getItems()
@@ -63,8 +44,6 @@ class DownloadJob extends \yii\db\ActiveRecord
 
 	public function beforeSave($insert)
 	{	
-		$this->accountClass = get_class($this->account);
-		$this->accountId 	= $this->account->getPrimaryKey();
 		$this->decrypted_dlc = Json::encode($this->decrypted_dlc);
 
 		return parent::beforeSave($insert);
@@ -112,8 +91,9 @@ class DownloadJob extends \yii\db\ActiveRecord
 
 		$dlc = Json::decode($this->decrypted_dlc);
 		$filesize = 0;
-
 		foreach ($dlc as $link) {
+
+			echo "create DownloadItem for link " . $link ."\n";
 
 			$dl = DownloadItem::getInstance($this,$link);
 			
@@ -129,25 +109,6 @@ class DownloadJob extends \yii\db\ActiveRecord
 		return parent::afterSave($insert,$changedAttributes);
 	}
 
-	/**
-	 * update Runners on DB with STATE_PROC and 
-	 * no pid on OS present
-	 */	
-	public function cleanUp()
-	{
-		$procItems = $this->getItems()
-			->andWhere(['state' => Dictionary::STATE_PROC])
-			->all();
-
-		foreach ($procItems as $item) {
-			if (!posix_getpgid($item->procid)) {
-				$item->updateAttributes([
-					'state' => Dictionary::STATE_PENDING,
-					'procid' => null
-				]);
-			}
-		}
-	}
 
 	public function getProcessedBytes()
 	{

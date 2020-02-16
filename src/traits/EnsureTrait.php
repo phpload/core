@@ -2,7 +2,7 @@
 
 declare (strict_types=1);
 
-namespace phpload\traits;
+namespace phpload\core\traits;
 
 trait EnsureTrait
 {

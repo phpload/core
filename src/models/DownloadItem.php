@@ -2,13 +2,14 @@
 
 declare (strict_types=1);
 
-namespace phpload\models;
+namespace phpload\core\models;
 
 use Yii;
 use yii\httpclient\Client;
-use phpload\interfaces\PremiumAccountInterface;
-use phpload\traits\EnsureTrait;
-use phpload\helpers\Dictionary;
+use phpload\core\interfaces\PremiumAccountInterface;
+use phpload\core\traits\EnsureTrait;
+use phpload\core\helpers\Dictionary;
+use yii\httpclient\Request;
 
 class DownloadItem extends \yii\db\ActiveRecord
 {
@@ -22,6 +23,11 @@ class DownloadItem extends \yii\db\ActiveRecord
 	private $job; 
 
 	private $client;
+
+	/**
+	 * @var PremiumAccountInterface
+	 */
+	private $account;
 
 	public static function tableName()
 	{
@@ -50,10 +56,45 @@ class DownloadItem extends \yii\db\ActiveRecord
 		return $this->link;
 	}
 
+	public function setAccount(PremiumAccountInterface $account)
+	{
+		$this->ensurePk($account);		
+		$this->account = $account;
+	}
+
+	public function getAccount(): PremiumAccountInterface
+	{
+		return $this->account ?? $this->hasOne($this->accountClass, [
+			'id' => 'accountId'
+		])->one();
+	}
+
 	public function beforeSave($insert)
 	{	
-		$account = $this->job->account;
+		$accountProbe = $this->resolveAccountByLink($this->link);
+
+		if (!$accountProbe) {
+			echo 'No Premium Account found for Link ' . $this->link;
+			return false;
+		}
+
+		$account = $accountProbe::find()->one();
+
+		if (!$account) {
+			echo $accountProbe->getTitle() . " is not configured. Cant Download!\n";
+			return false;
+		}
+
 		$account->setLink($this->link);
+
+		$this->accountClass = get_class($account);
+		$this->accountId 	= $account->getPrimaryKey();
+
+		if (!$account->getUrl()) {
+			echo $this->getJob()->id . " - " . $this->link . " is offline\n";
+			$this->state = Dictionary::STATE_OFFLINE;
+			return parent::beforeSave($insert);
+		}
 
 		$tempFileName = Yii::$app->security->generateRandomString(15);
 
@@ -65,45 +106,76 @@ class DownloadItem extends \yii\db\ActiveRecord
 		return parent::beforeSave($insert);
 	}
 
+	/**
+	 * iterate over all registered PremiumAccounts and 
+	 * probe the url.
+	 *
+	 * @param string $link the url to the Dowloadsource
+	 *
+	 * @return PremiumAccountInterface|null
+	 */
+	protected function resolveAccountByLink($link): ?PremiumAccountInterface
+	{
+		foreach (Yii::$app->getAccounts() as $account) {
+
+			if ($account->probeResponsibility($link)) {
+				return $account;
+			}
+		}
+
+		return null;
+	}
+
+
 	public static function getInstance(DownloadJob $job, string $link): DownloadItem
 	{
-		return new static([
+		$model = new static([
 			'pid'  => $job->getPrimaryKey(),
 			'link' =>  $link,
 			'state' => Dictionary::STATE_PENDING,
 			'job'  => $job
 		]);
+
+		return $model;
 	}
 
-	public function getClient()
-	{
-		if (!$this->client) {
-			$this->client = new Client([
-				'transport' => [
-					'class' => 'yii\httpclient\CurlTransport',
-					'requestConfig' => [
-						'options' => [
-							/** Detect Filesize and resume Download **/
-							CURLOPT_RESUME_FROM => -1
-						]
-					]
-				]
-			]);
-		}
-
-		return $this->client;
-	}
-
-	public function download()
+	public function getDownload($limitBandwidth=0): ?Request
 	{
 		$this->ensurePk($this);
-	
-		$fh = fopen($this->dest_file,'w');
-		Yii::error(print_r("Download to " . $this->dest_file,true),__METHOD__);
-		$this->getJob()
-			->account
+
+		$offset = 0;
+		if (file_exists($this->dest_file)) {
+			$offset = filesize($this->dest_file);
+			$fh = fopen($this->dest_file,'r+');
+
+			if ($offset > 0) {
+				fseek($fh, 1,SEEK_END);
+			}
+		} else {
+			$fh = fopen($this->dest_file,'w+');
+		}
+				
+		$client = new Client([
+			
+			'requestConfig' => [
+				'options' => [
+					// Detect Filesize and resume Download
+					CURLOPT_RESUME_FROM => $offset,
+					CURLOPT_MAX_RECV_SPEED_LARGE => $limitBandwidth*1024,
+					CURLOPT_NOPROGRESS => false,
+					CURLOPT_PROGRESSFUNCTION => function () {},
+				]
+			],
+			
+			'transport' => [
+				'class' => 'yii\httpclient\CurlTransport',
+
+			]
+		]);
+
+		return $this->getAccount()
 			->setUrl($this->source_url)
-			->download($this->getClient(),$fh)
+			->download($client,$fh)
 		;
 	}
 } 

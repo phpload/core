@@ -1,6 +1,6 @@
 <?php
 
-namespace phpload\helpers;
+namespace phpload\core\helpers;
 
 use Yii;
 
