@@ -103,7 +103,7 @@ class PhploadController extends Controller
 
 		$this->startWebserver($this->config['webserver']['binding']);
 
-		echo "Server started and listening to " . $this->config['webserver']['binding'] ."\n";
+		echo "Server started (pid " . getmypid() . ") and listening to " . $this->config['webserver']['binding'] ."\n";
 	}
 
 	public function actionRun()
@@ -158,9 +158,12 @@ class PhploadController extends Controller
 	public function startThreads()
 	{
 		$max = (int) $this->config['downloads']['threads'];
+
 		if (count($this->threads) >= $max) {
 			return;
 		}
+
+		$this->stdout(count($this->threads) . ' of ' . $max . " threads currently running\n");
 
 		$workload = DownloadItem::find()->where([
 			'state' => [Dictionary::STATE_PENDING,Dictionary::STATE_PAUSED]
@@ -170,20 +173,20 @@ class PhploadController extends Controller
 			return;
 		}
 
-		if ($max > count($workload)) {
-			$max = count($workload);
-		}
+		$max -= count($this->threads);
 
 		for ($i=0;$i<$max;$i++) {
 
 			if (!isset ($workload[$i])) {
+				$this->stdout("could not find offset!\n");
 				continue;
 			}
 
+			$this->stdout("DL Item id: " .$workload[$i]->getPrimaryKey() . " " . $workload[$i]->state . "\n");
 			$this->startThread($workload[$i]->getPrimaryKey());
 		}
 
-		$this->stdout($i ." Threads running.\n");
+		$this->stdout($i ." Threads started.\n");
 
 	}
 
@@ -223,71 +226,67 @@ class PhploadController extends Controller
 	 */
 	public function syncThreads()
 	{
-		/** @var $dlItemId DownloadItem PK **/
-		foreach ($this->threads as $pid => $dlItemId) {
-			if (!posix_getpgid($pid)) {
-				unset ($this->threads[$pid]);
-				$this->stdout("Set state to pending\n");
-				#$this->updateDlItemState($dlItemId,Dictionary::STATE_PENDING);
-				$this->updateDlItemState($dlItemId,'FOO1');
-			}
-		}
+		#Yii::$app->db->transaction(function () {
 
-		$max = (int) $this->config['downloads']['threads'];
-		if (count($this->threads) > $max) {
+			$procItems = DownloadItem::find()
+				->andWhere(['state' => Dictionary::STATE_PROC])
+				->indexBy('procid')
+				->all()
+			;
 
-  			$threads = $this->threads;
-			$offset  = count($threads)-$max;
+			/** @var $dlItemId DownloadItem PK **/
+			foreach ($this->threads as $pid => $dlItemId) {
+				if (!posix_getpgid($pid)) {
+					unset ($this->threads[$pid]);
+					if (isset ($procItems[$pid])) {
+						$transaction = DownloadItem::getDb()->beginTransaction();
+						try {
+							$procItems[$pid]->refresh();
 
-			foreach (array_slice($threads, -($offset)) as $pid) {
-				$this->stopThread($pid);
-			}
-		}
+							if ($procItems[$pid]->state !== Dictionary::STATE_PROC) {
+								continue;
+							}
 
-		/**
-		 * Sync DB: pid not in DB
-		 * update Runners on DB with STATE_PROC and 
-		 * no pid on OS present
-		 */	
-		$zombis = DownloadItem::find()
-			->andWhere(['state' => Dictionary::STATE_PROC])
-			->all()
-		;
-
-		foreach ($zombis as $item) {
-
-			if (posix_getpgid($item->procid)) {
-				continue;
+							$procItems[$pid]->state = Dictionary::STATE_PAUSED;
+							$procItems[$pid]->save();
+							$transaction->commit();
+						} catch (\Exception $e) {
+							$transaction->rollback();
+						} catch (\Throwable $e) {
+							$transaction->rollback();
+						}
+					}
+				}
 			}
 
-			$item->updateAttributes([
-				'state' => Dictionary::STATE_PAUSED,
-				'procid' => null
-			]);
-		}
-	}
+			$max = (int) $this->config['downloads']['threads'];
+			if (count($this->threads) > $max) {
 
-	/** 
-	 * Change the state of a DownloadItem
-	 *
-	 * @param int $pk Primary Key of DL-Item
-	 * @param string $state the new state
-	 *
-	 * @return bool
-	 */
-	private function updateDlItemState(int $pk, string $state): bool
-	{
-		$model = DownloadItem::findOne($pk);
+	  			$threads = array_keys($this->threads);
+				$offset  = count($threads)-$max;
 
-		if (!$model) {
-			return false;
-		}
+				foreach (array_slice($threads, -($offset)) as $pid) {
+					$this->stopThread($pid);
+				}
+			}
 
-		$model->updateAttributes([
-			'state' => $state
-		]);
+			/**
+			 * Sync DB: pid not in DB
+			 * update Runners on DB with STATE_PROC and 
+			 * no pid on OS present
+			 */	
+			foreach ($procItems as $item) {
 
-		return true;
+				if (posix_getpgid($item->procid)) {
+					continue;
+				}
+
+				$item->updateAttributes([
+					'state' => Dictionary::STATE_PAUSED,
+					'procid' => null
+				]);
+			}
+		#});
 	}
 
 	public function startWebserver($binding)

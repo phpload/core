@@ -85,7 +85,7 @@ class DownloadItem extends \yii\db\ActiveRecord
 			return false;
 		}
 
-		$account->setLink($this->link);
+		$account->setUrl($this->link);
 
 		$this->accountClass = get_class($account);
 		$this->accountId 	= $account->getPrimaryKey();
@@ -99,7 +99,7 @@ class DownloadItem extends \yii\db\ActiveRecord
 		$tempFileName = Yii::$app->security->generateRandomString(15);
 
 		$this->dest_file 	= $this->job->destination . '/' . $tempFileName;
-		$this->source_url 	= $account->getUrl();
+		$this->source_url 	= $this->link;
 		$this->size_bytes 	= $account->getContentlength();
 		$this->title 		= $account->getFilename();
 

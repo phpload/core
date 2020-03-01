@@ -56,7 +56,17 @@ class WorkerController extends Controller
 		]);
 
 		$client->send();
-		$item->updateAttributes(['state' => Dictionary::STATE_COMPLETED]);
+
+		$transaction = DownloadItem::getDb()->beginTransaction();
+		try {
+			$item->state = Dictionary::STATE_COMPLETED;
+			$item->save();
+			$transaction->commit();
+		} catch (\Exception $e) {
+			$transaction->rollback();
+		} catch (\Throwable $e) {
+			$transaction->rollback();
+		}
 		rename($item->dest_file, $config['downloads']['downloads'] . '/' . $item->title);
 	}	
 

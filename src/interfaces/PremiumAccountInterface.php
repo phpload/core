@@ -22,11 +22,18 @@ interface PremiumAccountInterface
 	public function getCookies(): array;
 
 	/** 
-	 * This method will be called after a new Instance of this interface was created
+	 * Resolve Downloadlink by given link from DLC.
+	 * Some OCH's generate a Downloadtickt after you follow
+	 * a DLC Link. This Method let you handel such scenarios.
 	 *
 	 * @param string $link the downloadlink from DLC
 	 */
-	public function setLink(string $link);
+	public function setUrl(string $link): self;
+
+	/** 
+	 * get the URL to the file to download
+	 */
+	public function getUrl(): ?string;
 
 	/**
 	 * get the filesize in bytes
@@ -45,11 +52,6 @@ interface PremiumAccountInterface
 	 * @return Request|null
 	 */
 	public function download(Client $client,$filehandler): ?Request;
-
-	/** 
-	 * get the URL to the file to download
-	 */
-	public function getUrl(): ?string;
 
 	/**
 	 * Probe for responsibility.
